@@ -1,0 +1,1030 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="https://unpkg.com/htmx.org"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <title>Dashboard</title>
+    <style>
+        /* Catppuccin Mocha - single source of truth for the palette. */
+        :root {
+            --ctp-red: #f38ba8;
+            --ctp-maroon: #eba0ac;
+            --ctp-peach: #fab387;
+            --ctp-yellow: #f9e2af;
+            --ctp-green: #a6e3a1;
+            --ctp-teal: #94e2d5;
+            --ctp-sky: #89dceb;
+            --ctp-sapphire: #74c7ec;
+            --ctp-blue: #89b4fa;
+            --ctp-lavender: #b4befe;
+            --ctp-text: #cdd6f4;
+            --ctp-subtext1: #bac2de;
+            --ctp-subtext0: #a6adc8;
+            --ctp-overlay1: #7f849c;
+            --ctp-overlay0: #6c7086;
+            --ctp-surface2: #585b70;
+            --ctp-surface1: #45475a;
+            --ctp-surface0: #313244;
+            --ctp-base: #1e1e2e;
+            --ctp-mantle: #181825;
+            --ctp-crust: #11111b;
+            color-scheme: dark;
+        }
+        html, body { background: var(--ctp-base); }
+        body { font-family: -apple-system, "Segoe UI", system-ui, sans-serif; color: var(--ctp-text); }
+        .tabular { font-variant-numeric: tabular-nums; font-family: "SF Mono", "Cascadia Code", Consolas, monospace; }
+
+        /* Long-call rows breathe via box-shadow intensity, not opacity, so they
+           never fade toward invisible mid-cycle the way Tailwind's animate-pulse
+           (opacity-based) does. */
+        @keyframes long-call-glow {
+            0%, 100% { box-shadow: 0 0 6px 0 var(--ctp-red); }
+            50% { box-shadow: 0 0 24px 4px var(--ctp-red); }
+        }
+        /* Duration matches the TL agent poll interval (tlAgentTimer, 2000ms) on
+           purpose: the roster re-renders via innerHTML replacement every tick,
+           which recreates these rows and restarts the animation. Since 0% and
+           100% are the same box-shadow value, a restart landing exactly on a
+           full-period boundary is indistinguishable from an uninterrupted
+           loop - a mismatched duration is what caused the visible stutter. */
+        .long-call-pulse { animation: long-call-glow 2s ease-in-out infinite; }
+        @media (prefers-reduced-motion: reduce) {
+            .long-call-pulse { animation: none; box-shadow: 0 0 10px 1px var(--ctp-red); }
+        }
+    </style>
+</head>
+<body class="h-screen flex flex-col overflow-hidden bg-[var(--ctp-base)] text-[var(--ctp-text)]">
+    <header class="border-b border-[var(--ctp-surface0)] bg-[var(--ctp-crust)] shrink-0 relative z-10">
+        <div class="mx-auto flex items-center justify-between px-6 py-2.5 gap-6">
+            <h1 class="text-sm font-semibold tracking-wide text-[var(--ctp-text)] uppercase">Operations Dashboard</h1>
+            <nav class="flex items-center gap-4">
+                <a href="#/" class="text-sm text-[var(--ctp-subtext0)] hover:text-[var(--ctp-text)] transition">TV View</a>
+                <a href="#TL" class="text-sm text-[var(--ctp-subtext0)] hover:text-[var(--ctp-text)] transition">Team Lead View</a>
+            </nav>
+            <div class="text-sm text-[var(--ctp-subtext0)] ml-auto flex items-center gap-4">
+                <span id="clock" class="tabular text-[var(--ctp-subtext1)]"></span>
+                <span id="last-updated" class="text-xs text-[var(--ctp-overlay0)]"></span>
+                <span class="flex items-center gap-1.5">
+                    <span class="relative flex h-2 w-2">
+                        <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-[var(--ctp-green)] opacity-75"></span>
+                        <span class="relative inline-flex h-2 w-2 rounded-full bg-[var(--ctp-green)]"></span>
+                    </span>
+                    Live
+                </span>
+                <button type="button" onclick="openBannerModal()" class="rounded-md border border-[var(--ctp-sapphire)] text-[var(--ctp-sapphire)] hover:bg-[var(--ctp-sapphire)] hover:text-[var(--ctp-crust)] transition text-xs font-semibold uppercase tracking-wide px-3 py-1.5">
+                    Post Banner
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <div id="alert-banner" class="hidden shrink-0"></div>
+
+    <main class="flex-1 min-h-0 flex flex-col w-full">
+        <!-- TV View: priority-sorted queue cards sized to be read from across a room. -->
+        <section id="view-tv" class="flex-1 min-h-0 flex flex-col gap-4 p-5">
+            <div id="tv-summary" class="shrink-0">
+                <p class="text-xs text-[var(--ctp-overlay0)]">Loading summary...</p>
+            </div>
+            <div id="tv-queues" class="flex-1 min-h-0">
+                <p class="text-xs text-[var(--ctp-overlay0)]">Loading queues...</p>
+            </div>
+        </section>
+
+        <!-- TL View: priority-sorted queue cards + a real agent roster table, for a
+             close-up monitor a team lead is actively working from. -->
+        <section id="view-tl" class="hidden flex-col gap-4 min-h-0 flex-1 w-full p-5">
+            <section class="shrink-0">
+                <div id="queue-section" class="grid gap-2" style="grid-template-columns: repeat(auto-fill, minmax(170px, 200px));">
+                    <p class="text-sm text-[var(--ctp-subtext0)]">Loading queues...</p>
+                </div>
+            </section>
+            <section class="flex-1 min-h-0 overflow-hidden">
+                <div id="agent-section" class="h-full overflow-hidden">
+                    <p class="text-sm text-[var(--ctp-subtext0)]">Loading agents...</p>
+                </div>
+            </section>
+        </section>
+    </main>
+
+    <!-- Banner composer, opened from the TL view's "Post Banner" button. -->
+    <div id="banner-modal" class="hidden fixed inset-0 z-50 items-center justify-center bg-black/60 p-4">
+        <div class="w-full max-w-md rounded-xl border border-[var(--ctp-surface1)] bg-[var(--ctp-mantle)] p-5 flex flex-col gap-4">
+            <h2 class="text-sm font-semibold uppercase tracking-wide text-[var(--ctp-text)]">Post Banner Alert</h2>
+            <div class="flex flex-col gap-1">
+                <label class="text-xs text-[var(--ctp-subtext0)]" for="banner-message">Message</label>
+                <textarea id="banner-message" rows="3" maxlength="200" class="rounded-md bg-[var(--ctp-crust)] border border-[var(--ctp-surface1)] px-3 py-2 text-sm text-[var(--ctp-text)] resize-none focus:outline-none focus:border-[var(--ctp-sapphire)]" placeholder="e.g. Fire drill at 3pm, please clear the floor"></textarea>
+            </div>
+            <div class="flex flex-col gap-1">
+                <label class="text-xs text-[var(--ctp-subtext0)]" for="banner-urgency">Urgency</label>
+                <select id="banner-urgency" class="rounded-md bg-[var(--ctp-crust)] border border-[var(--ctp-surface1)] px-3 py-2 text-sm text-[var(--ctp-text)] focus:outline-none focus:border-[var(--ctp-sapphire)]">
+                    <option value="info">Info</option>
+                    <option value="warning" selected>Warning</option>
+                    <option value="critical">Critical</option>
+                </select>
+            </div>
+            <div class="flex flex-col gap-1">
+                <label class="text-xs text-[var(--ctp-subtext0)]" for="banner-duration">Visible for</label>
+                <select id="banner-duration" class="rounded-md bg-[var(--ctp-crust)] border border-[var(--ctp-surface1)] px-3 py-2 text-sm text-[var(--ctp-text)] focus:outline-none focus:border-[var(--ctp-sapphire)]">
+                    <option value="5">5 minutes</option>
+                    <option value="15" selected>15 minutes</option>
+                    <option value="30">30 minutes</option>
+                    <option value="60">1 hour</option>
+                    <option value="240">4 hours</option>
+                </select>
+            </div>
+            <div class="flex items-center justify-end gap-2 mt-1">
+                <button type="button" onclick="closeBannerModal()" class="rounded-md px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-[var(--ctp-subtext0)] hover:text-[var(--ctp-text)]">Cancel</button>
+                <button type="button" onclick="submitBanner()" class="rounded-md bg-[var(--ctp-sapphire)] px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-[var(--ctp-crust)] hover:opacity-90">Post</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // ---- Config ----
+        const BASE = "http://dashboardbeo01.prd.aussiebb.io/api/v1";
+        const QUEUE_ENDPOINT = `${BASE}/queues/`;
+        const agentsEndpoint = (team) => `${BASE}/agents?team=${team}`;
+        const FETCH_TIMEOUT_MS = 5000;
+        const LONG_CALL_SECONDS = 20 * 60;
+
+        // Escalating severity for on-call rows past the long-call threshold -
+        // checked worst-first so a 95-minute call gets "critical", not
+        // "elevated". Color gets more alarming (and, at the worst tier,
+        // animated) the longer a call has run; ordering matches Catppuccin's
+        // own warm-color ramp (peach -> maroon -> red) instead of introducing
+        // new colors outside the palette.
+        const CALL_SEVERITY_TIERS = [
+            { minSeconds: 90 * 60, bg: "var(--ctp-red)", pulse: true }, // 1h30m+: critical
+            { minSeconds: 60 * 60, bg: "var(--ctp-red)", pulse: false }, // 1h-1h30m: severe
+            { minSeconds: 45 * 60, bg: "var(--ctp-maroon)", pulse: false }, // 45m-1h: high
+            { minSeconds: LONG_CALL_SECONDS, bg: "var(--ctp-peach)", pulse: false }, // 20m-45m: elevated
+        ];
+        function callSeverity(seconds) {
+            return CALL_SEVERITY_TIERS.find((t) => seconds >= t.minSeconds) ?? null;
+        }
+
+        // The agents API requires a ?team= filter (confirmed) - there is no
+        // "all teams" endpoint. So the queue->team mapping below is the single
+        // source of truth for which teams get fetched at all. Adding a new
+        // queue's TL/AE/RONA breakdown is one new entry here; anything not
+        // listed (including brand-new queue labels the API starts returning)
+        // renders count + wait time only, by design - see fetchQueueViewModels().
+        const QUEUE_CONFIG = {
+            "Res CS":          { teamParam: "rcs",       tl: "Level 2 CS", ae: "Customer Service - AE", level1: "Customer Service" },
+            "Res Sales":       { teamParam: "rsales",    tl: "TL Sales", ae: "Sales - AE", level1: "Residential Sales" },
+            "Res Activations": { teamParam: "rca",       tl: "", ae: "Activations - L2", level1: "Residential Customer Activations" },
+            "Res Accounts":    { teamParam: "raccounts", tl: "", ae: "", level1: "" },
+            "BECO Assurance":  { teamParam: "beco",      tl: "Business Support TL AE", ae: "Business Support TL AE", level1: "Billing" },
+        };
+        const EXCLUDED_QUEUE_LABELS = new Set(["Wholesale Support", "SMB Inbound Sales"]);
+
+        // TV summary strip: "Residential Total" is a deliberately narrower stat
+        // than "every queue" - just the two queues backed by the rcs/raccounts
+        // teams, not Sales, Activations, or BECO Assurance. Matched by team code
+        // (via QUEUE_CONFIG) rather than display label, since that's the stable
+        // identifier.
+        const RESIDENTIAL_TOTAL_TEAMS = new Set(["rcs", "raccounts"]);
+
+        const AGENT_ROSTER_TEAM = "rcs"; // team backing the TL agent roster board, unchanged from main.go's handleAgents
+
+        const ON_CALL_STATES = new Set([
+            "connected", "connectedconsulting", "connectedconsultreserved",
+            "consult", "consulting", "ringing", "onhold",
+        ]);
+        const NON_PRODUCTIVE_STATES = new Set(["rona", "break", "notready"]);
+
+        // ---- Utilities ----
+        function escapeHtml(value) {
+            return String(value ?? "").replace(/[&<>"']/g, (c) => ({
+                "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+            }[c]));
+        }
+
+        // ---- Queue breach uptime tracker (since page load) ----
+        const queueBreachTracker = {};
+        const trackerStartedAt = Date.now();
+
+        function updateBreachTracker(queueViews) {
+            const now = Date.now();
+
+            for (const q of queueViews) {
+                const tracker = queueBreachTracker[q.label] ??= {
+                    startedAt: now,
+                    breachedMs: 0,
+                    breachStartedAt: null,
+                };
+
+                if (q.breached) {
+                    if (tracker.breachStartedAt === null) {
+                        tracker.breachStartedAt = now;
+                    }
+                } else {
+                    if (tracker.breachStartedAt !== null) {
+                        tracker.breachedMs += now - tracker.breachStartedAt;
+                        tracker.breachStartedAt = null;
+                    }
+                }
+            }
+        }
+
+        function breachPercentage(label) {
+            const tracker = queueBreachTracker[label];
+            if (!tracker) return 0;
+
+            const now = Date.now();
+
+            let breachedMs = tracker.breachedMs;
+
+            if (tracker.breachStartedAt !== null) {
+                breachedMs += now - tracker.breachStartedAt;
+            }
+
+            const elapsed = now - tracker.startedAt;
+
+            if (elapsed <= 0) return 0;
+
+            const serviceLevelMs = elapsed - breachedMs;
+
+            return Math.max(0, Math.min(100, (serviceLevelMs / elapsed) * 100));
+        }
+
+        async function tickTlQueues() {
+            try {
+                const queueViews = await fetchQueueViewModels();
+
+                updateBreachTracker(queueViews);
+
+                renderInto("queue-section", renderTlQueues(queueViews));
+                markUpdated();
+            } catch (err) {
+                console.error(err);
+            }
+        }
+
+        function safeCount(countsByTeam, subTeam, state) {
+            return countsByTeam?.[subTeam]?.[state] ?? 0;
+        }
+
+        async function fetchJSON(url) {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+            try {
+                const res = await fetch(url, { signal: controller.signal });
+                if (!res.ok) throw new Error(`${url} -> ${res.status} ${res.statusText}`);
+                return await res.json();
+            } finally {
+                clearTimeout(timer);
+            }
+        }
+
+        function countByState(agents) {
+            const counts = {};
+            for (const agent of agents) {
+                counts[agent.teamName] ??= {};
+                counts[agent.teamName][agent.raw_status] = (counts[agent.teamName][agent.raw_status] || 0) + 1;
+            }
+            return counts;
+        }
+
+        // "00:12:34" / "12:34" -> seconds. Falls back to 0 (never throws) if the
+        // format ever changes - used for ranking worst-wait across queues.
+        function durationSeconds(value) {
+            const parts = String(value ?? "").split(":").map(Number);
+            if (parts.length === 0 || parts.some(Number.isNaN)) return 0;
+            return parts.reduce((acc, v) => acc * 60 + v, 0);
+        }
+
+        // Agents are already sorted oldest-timestamp-first (longest in their
+        // current state first) using this same field - it's the reliable epoch
+        // source, unlike last_status_change which is just the display string.
+        //
+        // "now" here is the freshest timestamp already present in the agent
+        // payload, NOT the browser's Date.now(). The sort above only ever
+        // compares agents' timestamps to each other, so it works regardless of
+        // what clock/units the server's timestamp field actually uses - mixing
+        // in Date.now() here would break that if the browser and server clocks
+        // (or units) don't line up exactly, silently zeroing every duration via
+        // the Math.max(0, ...) floor. Comparing only within the payload keeps
+        // this check on the same self-consistent basis as the sort.
+        //
+        // Seconds-since-epoch won't reach 10^12 until the year 2286, so any
+        // timestamp at or above that is unambiguously milliseconds - this lets
+        // the threshold check work correctly whichever convention the agents
+        // API actually uses instead of assuming one.
+        function toEpochSeconds(value) {
+            return value >= 1e12 ? Math.floor(value / 1000) : value;
+        }
+
+        function secondsInCurrentState(agent, referenceNow) {
+            return Math.max(0, toEpochSeconds(referenceNow) - toEpochSeconds(agent.timestamp));
+        }
+
+        function severityFor(count) {
+            if (count > 12) return "critical";
+            if (count > 5) return "elevated";
+            return "normal";
+        }
+
+        const SEVERITY_ACCENT = {
+            critical: "border-[var(--ctp-red)] bg-[color-mix(in_srgb,var(--ctp-red)_12%,var(--ctp-mantle))]",
+            elevated: "border-[var(--ctp-peach)] bg-[color-mix(in_srgb,var(--ctp-peach)_10%,var(--ctp-mantle))]",
+            normal:   "border-[var(--ctp-surface2)] bg-[var(--ctp-mantle)]",
+        };
+        const SEVERITY_TEXT = {
+            critical: "text-[var(--ctp-red)]",
+            elevated: "text-[var(--ctp-peach)]",
+            normal:   "text-[var(--ctp-text)]",
+        };
+
+        // ---- Data layer ----
+        // Builds one view model shared by both the TV and TL queue renderers, so
+        // the team-mapping/severity/fallback logic lives in exactly one place.
+        // Queues are ranked busiest-first so the most urgent one always leads.
+        async function fetchQueueViewModels() {
+            const rawQueues = await fetchJSON(QUEUE_ENDPOINT);
+            const visible = rawQueues.filter((q) => !EXCLUDED_QUEUE_LABELS.has(q.label));
+
+            // Only fetch agent data for teams actually backing a currently-present,
+            // mapped queue - so as queues come and go, fetch volume tracks reality
+            // instead of always hitting every historically-known team.
+            const neededTeams = [...new Set(
+                visible.map((q) => QUEUE_CONFIG[q.label]?.teamParam).filter(Boolean)
+            )];
+
+            const settled = await Promise.allSettled(
+                neededTeams.map((team) => fetchJSON(agentsEndpoint(team)))
+            );
+
+            const countsByTeam = {};
+            neededTeams.forEach((team, i) => {
+                const result = settled[i];
+                if (result.status === "fulfilled") {
+                    countsByTeam[team] = countByState(result.value);
+                } else {
+                    // One team's agent feed being down shouldn't blank the whole
+                    // board - zero-fill it and keep rendering everything else.
+                    console.error(`Failed to load agents for team=${team}:`, result.reason);
+                    countsByTeam[team] = {};
+                }
+            });
+
+            const views = visible.map((q) => {
+                const cfg = QUEUE_CONFIG[q.label];
+                const mapped = Boolean(cfg);
+                const counts = mapped ? countsByTeam[cfg.teamParam] : undefined;
+                const breached = q.breached === "Y";
+
+                return {
+                    label: q.label,
+                    count: q.count,
+                    longest: q.longest,
+                    breached,
+                    mapped,
+                    teamParam: mapped ? cfg.teamParam : null,
+                    severity: breached ? "critical" : "normal",
+                    tlAvailable: mapped ? safeCount(counts, cfg.tl, "available") : 0,
+                    aeAvailable: mapped ? safeCount(counts, cfg.ae, "available") : 0,
+                    rona: mapped ? safeCount(counts, cfg.level1, "rona") : 0,
+                };
+            });
+            return views.sort((a, b) => b.count - a.count);
+        }
+
+        async function fetchAgentsViewModel() {
+            const agents = await fetchJSON(agentsEndpoint(AGENT_ROSTER_TEAM));
+            agents.sort((a, b) => a.timestamp - b.timestamp);
+            return agents;
+        }
+
+        // ---- Render: TV summary strip ----
+        function renderTvSummary(queueViews) {
+            if (queueViews.length === 0) return "";
+            const residentialTotal = queueViews
+                .filter((q) => q.teamParam && RESIDENTIAL_TOTAL_TEAMS.has(q.teamParam))
+                .reduce((s, q) => s + q.count, 0);
+            const totalAvailable = queueViews.reduce((s, q) => s + q.tlAvailable + q.aeAvailable, 0);
+            const alertCount = queueViews.filter((q) => q.severity !== "normal").length;
+            const worst = queueViews.reduce(
+                (best, q) => (durationSeconds(q.longest) > durationSeconds(best) ? q.longest : best),
+                queueViews[0].longest
+            );
+            // 2-up on narrower screens instead of forcing all 4 into one
+            // ever-shrinking row; back to a single row of 4 from sm: up. Value
+            // text steps down a notch below sm too, so it isn't oversized for
+            // the narrower tile it now sits in.
+            const stat = (label, value, accentVar, valueClass, valueSizeClass) => `
+                <div class="min-w-0 rounded-lg border-l-4 bg-[var(--ctp-mantle)] px-4 py-2.5 sm:px-5 sm:py-3 flex items-center justify-between gap-3 sm:gap-4" style="border-color:${accentVar}">
+                    <p class="text-xs font-semibold uppercase tracking-widest text-[var(--ctp-subtext0)] truncate">${label}</p>
+                    <p class="tabular ${valueSizeClass ?? "text-3xl sm:text-4xl xl:text-5xl"} font-bold leading-none shrink-0 ${valueClass}">${escapeHtml(value)}</p>
+                </div>`;
+            return `
+                <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+                    ${stat("Residential Total", residentialTotal, "var(--ctp-lavender)", residentialTotal > 0 ? "text-[var(--ctp-peach)]" : "text-[var(--ctp-text)]")}
+                    ${stat("Worst Wait", worst, "var(--ctp-surface2)", "text-[var(--ctp-text)]", "text-2xl sm:text-3xl xl:text-4xl")}
+                    ${stat("Agents Available", totalAvailable, "var(--ctp-green)", "text-[var(--ctp-green)]")}
+                    ${stat("Queues In Alert", alertCount, "var(--ctp-red)", alertCount > 0 ? "text-[var(--ctp-red)]" : "text-[var(--ctp-text)]")}
+                </div>`;
+        }
+
+        // ---- Queue count history (5-minute snapshots, in-memory only) ----
+        // Keyed by queue label so it survives view switches (TV <-> TL) and
+        // is independent of each view's own poll cadence (30s / 2s) - those
+        // polls just redraw the current count; this is a separate slower
+        // sampling clock purely for the 5/10/15-minute-ago comparison below.
+        const QUEUE_HISTORY_STEP_MINUTES = 5;
+        const QUEUE_HISTORY_MAX_SAMPLES = 3; // covers the 15-minute-ago comparison
+        const QUEUE_HISTORY_OFFSETS = [5, 10, 15]; // minutes ago, shown on every card
+        const queueCountHistory = {}; // { [label]: number[] }, oldest first
+
+        function recordQueueSnapshot(queueViews) {
+            for (const q of queueViews) {
+                const history = (queueCountHistory[q.label] ??= []);
+                history.push(q.count);
+                if (history.length > QUEUE_HISTORY_MAX_SAMPLES) history.shift();
+            }
+        }
+
+        async function tickQueueHistory() {
+            try {
+                recordQueueSnapshot(await fetchQueueViewModels());
+            } catch (err) {
+                console.error("Failed to sample queue history:", err);
+            }
+        }
+
+        // Diff against the sample taken `minutesAgo` back, which lives
+        // `minutesAgo / QUEUE_HISTORY_STEP_MINUTES` slots from the end of the
+        // history array (history is oldest-first). Returns null until enough
+        // samples have been collected for that offset.
+        function queueDelta(history, currentCount, minutesAgo) {
+            const stepsBack = minutesAgo / QUEUE_HISTORY_STEP_MINUTES;
+            if (!history || history.length < stepsBack) return null;
+            return currentCount - history[history.length - stepsBack];
+        }
+
+        // Small "+N / -N / even" chips for each configured offset. Up (more
+        // callers waiting) reads as bad -> red; down reads as good -> green;
+        // unchanged is neutral. Renders "--" for offsets without enough
+        // history yet rather than omitting the chip, so the layout doesn't
+        // jump as samples accumulate.
+        function renderQueueDeltas(history, currentCount, size) {
+            const big = size === "lg";
+            const chips = QUEUE_HISTORY_OFFSETS.map((minutes) => {
+                const delta = queueDelta(history, currentCount, minutes);
+                let text, colorVar;
+                if (delta === null) {
+                    text = "--";
+                    colorVar = "var(--ctp-overlay0)";
+                } else if (delta > 0) {
+                    text = `▲ ${delta}`;
+                    colorVar = "var(--ctp-red)";
+                } else if (delta < 0) {
+                    text = `▼ ${Math.abs(delta)}`;
+                    colorVar = "var(--ctp-green)";
+                } else {
+                    text = "even";
+                    colorVar = "var(--ctp-overlay0)";
+                }
+                return `
+                    <div class="flex-1 mt-2 rounded-lg text-center ${big ? "px-3 py-2" : "px-2 py-1"}" style="background:color-mix(in srgb, ${colorVar} 16%, var(--ctp-mantle))">
+                        <p class="${big ? "text-[0.65rem]" : "text-[0.55rem]"} font-semibold uppercase tracking-widest text-[var(--ctp-subtext0)]">${minutes}m ago</p>
+                        <p class="tabular ${big ? "text-xl xl:text-2xl" : "text-sm"} font-black leading-tight" style="color:${colorVar}">${text}</p>
+                    </div>`;
+            }).join("");
+            return `<div class="flex gap-2">${chips}</div>`;
+        }
+
+        // ---- Render: TV queues (large cards, busiest first) ----
+        function renderTvQueueCard(q) {
+            const breakdown = q.mapped ? `
+                    <div class="grid grid-cols-3 gap-3 pt-2">
+                        <div class="rounded-lg bg-[color-mix(in_srgb,var(--ctp-green)_14%,var(--ctp-mantle))] px-3 py-2.5 text-center">
+                            <p class="text-[0.65rem] font-semibold uppercase tracking-widest text-[var(--ctp-green)]">TL Avail</p>
+                            <p class="tabular text-2xl xl:text-3xl font-black text-[var(--ctp-green)]">${q.tlAvailable}</p>
+                        </div>
+                        <div class="rounded-lg bg-[color-mix(in_srgb,var(--ctp-green)_14%,var(--ctp-mantle))] px-3 py-2.5 text-center">
+                            <p class="text-[0.65rem] font-semibold uppercase tracking-widest text-[var(--ctp-green)]">AE Avail</p>
+                            <p class="tabular text-2xl xl:text-3xl font-black text-[var(--ctp-green)]">${q.aeAvailable}</p>
+                        </div>
+                        <div class="rounded-lg bg-[color-mix(in_srgb,var(--ctp-red)_14%,var(--ctp-mantle))] px-3 py-2.5 text-center">
+                            <p class="text-[0.65rem] font-semibold uppercase tracking-widest text-[var(--ctp-red)]">RONA</p>
+                            <p class="tabular text-2xl xl:text-3xl font-black ${q.rona > 0 ? "text-[var(--ctp-red)]" : "text-[var(--ctp-overlay0)]"}">${q.rona}</p>
+                        </div>
+                    </div>` : `
+                    <p class="text-xs text-[var(--ctp-overlay0)] uppercase tracking-widest text-center py-3">No team mapping configured</p>`;
+            return `
+                <div class="rounded-xl border-2 ${SEVERITY_ACCENT[q.severity]} p-2 flex flex-col min-w-0">
+                    <h3 class="text-sm font-bold text-[var(--ctp-text)] truncate mb-3">
+                        ${escapeHtml(q.label)}
+                    </h3>
+
+                    <div class="grid grid-cols-3 gap-2">
+                        <div class="rounded-lg bg-[var(--ctp-crust)] p-4 text-center min-w-0 ">
+                            <p class="text-xs font-semibold uppercase tracking-widest text-[var(--ctp-subtext0)] mb-1">
+                                In Queue
+                            </p>
+                            <p class="tabular text-4xl pt-2 font-black leading-none whitespace-nowrap ${SEVERITY_TEXT[q.severity]}">
+                                ${escapeHtml(q.count)}
+                            </p>
+                        </div>
+
+                        <div class="rounded-lg bg-[var(--ctp-crust)] p-4 text-center min-w-0">
+                            <p class="text-xs font-semibold uppercase tracking-widest text-[var(--ctp-subtext0)] mb-1">
+                                Wait Time
+                            </p>
+                            <p class="tabular text-2xl md:text-3xl lg:text-4xl pt-2 font-black leading-none  ">
+                                ${escapeHtml(q.longest)}
+                            </p>
+                        </div>
+
+                        <div class="rounded-lg bg-[var(--ctp-crust)] p-4 text-center min-w-0">
+                            <p class="text-xs font-semibold uppercase tracking-widest text-[var(--ctp-subtext0)] mb-1">
+                                In Service Level
+                            </p>
+                            <p class="tabular text-2xl lg:text-3xl pt-2 font-black leading-none whitespace-nowrap ${
+                                breachPercentage(q.label) >= 80
+                                    ? "text-[var(--ctp-green)]"
+                                    : breachPercentage(q.label) >= 50
+                                        ? "text-[var(--ctp-peach)]"
+                                        : "text-[var(--ctp-red)]"
+                            }">
+                                ${breachPercentage(q.label).toFixed(1)}%
+                            </p>
+                        </div>
+                    </div>
+
+                    ${renderQueueDeltas(queueCountHistory[q.label], q.count, "lg")}
+                    ${breakdown}
+                </div>`;
+        }
+
+        function renderTvQueues(queueViews) {
+            if (queueViews.length === 0) {
+                return `<div class="h-full flex items-center justify-center"><p class="text-2xl text-[var(--ctp-overlay0)]">No calls in any queues.</p></div>`;
+            }
+            const cards = queueViews.map(renderTvQueueCard).join("");
+            return `
+                <div class="h-full min-h-0 overflow-y-auto">
+                    <div class="grid gap-5 grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 auto-rows-fr">
+                        ${cards}
+                    </div>
+                </div>`;
+        }
+
+        // ---- Render: TL queues (compact cards, busiest first) ----
+        function renderTlQueueCard(q) {
+            const breakdown = q.mapped ? `
+                        <div class="grid grid-cols-3 gap-1 mt-1.5 pt-1.5 border-t border-[var(--ctp-surface0)]">
+                            <div class="text-center">
+                                <p class="text-[0.55rem] uppercase tracking-wide text-[var(--ctp-subtext0)]">TL</p>
+                                <p class="tabular text-sm font-bold text-[var(--ctp-green)]">${q.tlAvailable}</p>
+                            </div>
+                            <div class="text-center">
+                                <p class="text-[0.55rem] uppercase tracking-wide text-[var(--ctp-subtext0)]">AE</p>
+                                <p class="tabular text-sm font-bold text-[var(--ctp-green)]">${q.aeAvailable}</p>
+                            </div>
+                            <div class="text-center">
+                                <p class="text-[0.55rem] uppercase tracking-wide text-[var(--ctp-subtext0)]">RONA</p>
+                                <p class="tabular text-sm font-bold ${q.rona > 0 ? "text-[var(--ctp-red)]" : "text-[var(--ctp-overlay0)]"}">${q.rona}</p>
+                            </div>
+                        </div>` : `
+                        <p class="mt-1.5 text-[0.6rem] text-[var(--ctp-overlay0)] uppercase tracking-wide text-center">Unmapped</p>`;
+            return `
+               <div class="rounded-md border-2 ${SEVERITY_ACCENT[q.severity]} px-2.5 py-2 flex flex-col min-w-fit">
+                    <h3 class="text-xs font-bold text-[var(--ctp-text)] truncate mb-1">
+                        ${escapeHtml(q.label)}
+                    </h3>
+
+                    <div class="flex items-baseline justify-between gap-2">
+                        <span class="text-[0.55rem] uppercase tracking-wide text-[var(--ctp-subtext0)]">
+                            Queue
+                        </span>
+                        <span class="tabular text-xl font-black leading-none whitespace-nowrap ${SEVERITY_TEXT[q.severity]}">
+                            ${escapeHtml(q.count)}
+                        </span>
+                    </div>
+
+                    <div class="flex items-baseline justify-between gap-2">
+                        <span class="text-[0.55rem] uppercase tracking-wide text-[var(--ctp-subtext0)]">
+                            Wait
+                        </span>
+                        <span class="tabular text-sm font-semibold whitespace-nowrap text-[var(--ctp-text)]">
+                            ${escapeHtml(q.longest)}
+                        </span>
+                    </div>
+
+                    <div class="flex items-baseline justify-between gap-2">
+                        <span class="text-[0.55rem] uppercase tracking-wide text-[var(--ctp-subtext0)]">
+                            In Service Level
+                        </span>
+                        <span class="tabular text-sm font-bold whitespace-nowrap ${
+                            breachPercentage(q.label) >= 80
+                                ? "text-[var(--ctp-green)]"
+                                : breachPercentage(q.label) >= 50
+                                    ? "text-[var(--ctp-peach)]"
+                                    : "text-[var(--ctp-red)]"
+                        }">
+                            ${breachPercentage(q.label).toFixed(1)}%
+                        </span>
+                    </div>
+
+                    <div class="mt-1 flex justify-center">
+                        ${renderQueueDeltas(queueCountHistory[q.label], q.count)}
+                    </div>
+
+                    ${breakdown}
+                </div>
+`;
+        }
+
+        function renderTlQueues(queueViews) {
+            if (queueViews.length === 0) return `<p class="text-sm text-[var(--ctp-subtext0)]">No calls in any queues.</p>`;
+            return queueViews.map(renderTlQueueCard).join("");
+        }
+
+        // ---- Render: agent roster (real rows, not a tag cloud) ----
+        // Available / Non-Productive only - see onCallRow/onCallPanel below
+        // for the On Call section, which is themed and laid out separately.
+        function agentRow(agent, accentVar, stateClass, showState) {
+            const name = agent.name?.[0];
+            return `
+                <div class="break-inside-avoid flex items-center justify-between gap-3 border-l-2 bg-[var(--ctp-mantle)] pl-3 pr-2 py-1 rounded-r mb-1" style="border-color:${accentVar}">
+                    <span class="truncate text-sm text-[var(--ctp-text)]">${escapeHtml(name)}</span>
+                    <span class="flex items-center gap-3 shrink-0">
+                        ${showState ? `<span class="text-[0.65rem] font-semibold uppercase tracking-wide ${stateClass}">${escapeHtml(agent.raw_status)}</span>` : ""}
+                        <span class="tabular text-xs text-[var(--ctp-subtext0)]">${escapeHtml(agent.last_status_change)}</span>
+                    </span>
+                </div>`;
+        }
+
+        function agentPanel(title, agents, accentVar, titleClass, showState, extraClass, emptyText) {
+            const body = agents.length === 0
+                ? `<p class="text-xs italic text-[var(--ctp-overlay0)] px-1 py-2">${escapeHtml(emptyText ?? "No agents")}</p>`
+                : agents.map((a) => agentRow(a, accentVar, titleClass, showState)).join("");
+            // CSS multi-column layout, capped at 2 columns. column-fill:auto
+            // fills columns top-to-bottom in DOM order - column 1 first, then
+            // column 2 - instead of the default "balance" mode, which tries
+            // to even out column heights and can render fewer columns than
+            // expected while doing so. break-inside-avoid on each row (set on
+            // agentRow) stops a row from being visually split across a
+            // column break.
+            return `
+                <div class="rounded-lg bg-[var(--ctp-base)] border-2 p-3 flex flex-col min-h-0 ${extraClass ?? ""}" style="border-color:${accentVar}">
+                    <div class="mb-2 shrink-0 flex items-center gap-2">
+                        <h3 class="text-sm font-semibold ${titleClass}">${title} <span class="text-[var(--ctp-subtext0)] font-normal">(${agents.length})</span></h3>
+                    </div>
+                    <div class="roster-list flex-1 min-h-0 overflow-auto pr-1 columns-2 gap-3 [column-fill:auto]">
+                        ${body}
+                    </div>
+                </div>`;
+        }
+
+        // ---- Render: On Call section ----
+        // Its own row/panel renderers, themed independently from the
+        // Available/Non-Productive columns above. On Call is the busiest,
+        // most-watched board on this screen, so calls past the long-call
+        // threshold render as solid alert bars (not just tinted rows), color-
+        // coded by severity tier (see CALL_SEVERITY_TIERS) so they read as
+        // "different" even in peripheral vision, and get more alarming the
+        // longer they run.
+        //
+        // No grouping div for long calls - agents arrive already sorted
+        // oldest-in-state-first (see fetchAgentsViewModel), so the most
+        // severe calls naturally land first without any extra grouping
+        // markup. That matters here specifically because a single row is the
+        // largest indivisible (break-inside-avoid) unit the column-fitting
+        // below has to place - a grouping wrapper around many rows would be
+        // one large indivisible block that column math can't split evenly,
+        // which is what caused the scrollbar this replaces.
+        function onCallRow(agent, severity) {
+            const name = agent.name?.[0];
+            if (severity) {
+                return `
+                <div class="oncall-row break-inside-avoid flex items-center justify-between gap-3 pl-3 pr-3 py-1.5 rounded mb-1.5 ${severity.pulse ? "long-call-pulse" : ""}" style="background:${severity.bg};">
+                    <span class="flex items-center gap-2 min-w-0">
+                        <span aria-hidden="true" class="text-sm leading-none">⚠</span>
+                        <span class="truncate text-sm font-black text-[var(--ctp-crust)]">${escapeHtml(name)}</span>
+                    </span>
+                    <span class="tabular shrink-0 rounded bg-[var(--ctp-crust)] px-2 py-0.5 text-xs font-black" style="color:${severity.bg}">${escapeHtml(agent.last_status_change)}</span>
+                </div>`;
+            }
+            return `
+                <div class="oncall-row break-inside-avoid flex items-center justify-between gap-3 pl-3 pr-3 py-1.5 rounded mb-1.5 bg-[var(--ctp-mantle)] hover:bg-[var(--ctp-surface0)] transition-colors">
+                    <span class="truncate text-sm text-[var(--ctp-text)]">${escapeHtml(name)}</span>
+                    <span class="tabular shrink-0 text-xs text-[var(--ctp-sapphire)]">${escapeHtml(agent.last_status_change)}</span>
+                </div>`;
+        }
+
+        function onCallPanel(agents, referenceNow, headerExtra, emptyText) {
+            const body = agents.length === 0
+                ? `<p class="text-xs italic text-[var(--ctp-overlay0)] px-1 py-3">${escapeHtml(emptyText ?? "No agents")}</p>`
+                : agents.map((a) => onCallRow(a, callSeverity(secondsInCurrentState(a, referenceNow)))).join("");
+            // Columns instead of a vertical scrollbar: column-count is set by
+            // sizeOnCallColumns() right after this markup lands in the DOM,
+            // computed from a real height measurement so it always comes out
+            // to exactly enough columns to fit every row - see that function
+            // for why. column-fill:auto fills column 1 top-to-bottom before
+            // starting column 2; break-inside-avoid (on each row, above)
+            // keeps a row from being visually cut across a column break.
+            return `
+                <div class="rounded-lg bg-[var(--ctp-base)] border-2 p-3 flex flex-col min-h-0 md:col-span-2 xl:col-span-2" style="border-color:var(--ctp-sapphire)">
+                    <div class="mb-2 shrink-0 flex items-center gap-2">
+                        <h3 class="text-sm font-semibold text-[var(--ctp-sapphire)]">On Call <span class="text-[var(--ctp-subtext0)] font-normal">(${agents.length})</span></h3>
+                        ${headerExtra ?? ""}
+                    </div>
+                    <div id="oncall-roster" class="flex-1 min-h-0 overflow-auto pr-1 [column-fill:auto] gap-3">
+                        ${body}
+                    </div>
+                </div>`;
+        }
+
+        // Sets #oncall-roster's column-count to exactly enough columns to
+        // fit every row within the panel's fixed height, so it never needs a
+        // vertical scrollbar. Resetting to a single flowing column first
+        // gives an accurate natural content height to measure against -
+        // reading it while already split into columns would measure the
+        // *columnized* height instead (each column short because content is
+        // spread across several), undercounting how many columns are
+        // actually needed.
+        function sizeOnCallColumns() {
+            const el = document.getElementById("oncall-roster");
+            if (!el || !el.querySelector(".oncall-row")) return; // no rows (or empty-state text) - nothing to column-ize
+            el.style.columnCount = "auto";
+            const neededCols = Math.max(1, Math.ceil(el.scrollHeight / el.clientHeight));
+            el.style.columnCount = neededCols;
+        }
+
+        function renderAgents(agents) {
+            // Self-referential "now" - see secondsInCurrentState() for why this
+            // deliberately isn't Date.now().
+            const referenceNow = agents.reduce((max, a) => Math.max(max, a.timestamp ?? 0), 0);
+
+            const excludeCoreTeams = (a) => a.teamName !== "Level 2 CS" && a.teamName !== "Customer Service - AE";
+
+            const available = agents.filter((a) => a.raw_status === "available" && excludeCoreTeams(a));
+            const onCall = agents.filter((a) => ON_CALL_STATES.has(a.raw_status) && excludeCoreTeams(a));
+            const nonProductive = agents.filter((a) =>
+                NON_PRODUCTIVE_STATES.has(a.raw_status) && excludeCoreTeams(a) && a.teamName !== "CS Team Managers"
+            );
+
+            // Toggle lets a TL collapse a busy board down to just the calls that
+            // need attention; the button always shows the long-call count (even
+            // in "all" mode) so it doubles as an at-a-glance alert.
+            const longOnCall = onCall.filter((a) => secondsInCurrentState(a, referenceNow) >= LONG_CALL_SECONDS);
+            const visibleOnCall = showLongCallsOnly ? longOnCall : onCall;
+            const onCallToggle = `
+                <button type="button" onclick="toggleLongCallsOnly()" class="ml-auto shrink-0 rounded-full border px-2.5 py-1 text-[0.65rem] font-bold uppercase tracking-wide transition ${
+                    showLongCallsOnly
+                        ? "border-[var(--ctp-red)] bg-[var(--ctp-red)] text-[var(--ctp-crust)]"
+                        : "border-[var(--ctp-surface2)] text-[var(--ctp-subtext0)] hover:border-[var(--ctp-red)] hover:text-[var(--ctp-red)]"
+                }">
+                    ${showLongCallsOnly ? "Showing Long Only" : "Show Long Only"}${longOnCall.length > 0 ? ` · ${longOnCall.length}` : ""}
+                </button>`;
+            const onCallEmptyText = showLongCallsOnly ? "No calls over 20 minutes right now." : "No agents on call.";
+
+            return `
+                <div class="grid h-full min-h-0 gap-2 md:grid-cols-3 xl:grid-cols-3">
+                    <div class="flex flex-col gap-2 min-h-0">
+                        ${agentPanel("Available", available, "var(--ctp-green)", "text-[var(--ctp-green)]", false, "flex-1", "No agents available.")}
+                        ${agentPanel("Non-Productive States", nonProductive, "var(--ctp-red)", "text-[var(--ctp-red)]", true, "flex-1", "No agents in a non-productive state.")}
+                    </div>
+                    ${onCallPanel(visibleOnCall, referenceNow, onCallToggle, onCallEmptyText)}
+                </div>`;
+        }
+
+        // ---- Poll lifecycle ----
+        function renderInto(id, html) {
+            document.getElementById(id).innerHTML = html;
+        }
+
+        function markUpdated() {
+            const now = new Date();
+            document.getElementById("last-updated").textContent =
+                `updated ${now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`;
+        }
+
+        function tickClock() {
+            document.getElementById("clock").textContent =
+                new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        }
+        tickClock();
+        setInterval(tickClock, 1000);
+
+        let tvTimer = null;
+        let tlQueueTimer = null;
+        let tlAgentTimer = null;
+        let showLongCallsOnly = false;
+        let lastAgentsSnapshot = [];
+
+        async function tickTvQueues() {
+            try {
+                const queueViews = await fetchQueueViewModels();
+
+                updateBreachTracker(queueViews);
+
+                renderInto("tv-summary", renderTvSummary(queueViews));
+                renderInto("tv-queues", renderTvQueues(queueViews));
+                markUpdated();
+            } catch (err) {
+                console.error("Failed to load TV queues:", err);
+            }
+        }
+
+        async function tickTlQueues() {
+            try {
+                const queueViews = await fetchQueueViewModels();
+
+                updateBreachTracker(queueViews);
+
+                renderInto("queue-section", renderTlQueues(queueViews));
+                markUpdated();
+            } catch (err) {
+                console.error("Failed to load TL queues:", err);
+            }
+        }
+        async function tickTlAgents() {
+            try {
+                lastAgentsSnapshot = await fetchAgentsViewModel();
+                renderInto("agent-section", renderAgents(lastAgentsSnapshot));
+                sizeOnCallColumns();
+            } catch (err) {
+                console.error("Failed to load agents:", err);
+            }
+        }
+
+        // Re-renders from the last-fetched snapshot rather than awaiting a fresh
+        // fetch, so the toggle flips instantly instead of lagging a network
+        // round-trip behind the click.
+        function toggleLongCallsOnly() {
+            showLongCallsOnly = !showLongCallsOnly;
+            renderInto("agent-section", renderAgents(lastAgentsSnapshot));
+            sizeOnCallColumns();
+        }
+
+        // Column count depends on the panel's actual pixel height, which
+        // changes on resize (or a browser zoom change) independently of the
+        // 2s poll - re-fit against the already-rendered rows (no re-fetch)
+        // so the layout doesn't sit on a stale column count until the next tick.
+        let resizeTimer;
+        window.addEventListener("resize", () => {
+            clearTimeout(resizeTimer);
+            resizeTimer = setTimeout(sizeOnCallColumns, 150);
+        });
+
+        // Independent of the TV/TL view timers above - runs continuously
+        // from page load regardless of which view is active, so trend
+        // history keeps accumulating across view switches.
+        tickQueueHistory();
+        setInterval(tickQueueHistory, 5 * 60 * 1000);
+
+        function startTV() {
+            tickTvQueues();
+            tvTimer = setInterval(tickTvQueues, 30000);
+        }
+        function stopTV() {
+            clearInterval(tvTimer);
+            tvTimer = null;
+        }
+        function startTL() {
+            tickTlQueues();
+            tlQueueTimer = setInterval(tickTlQueues, 2000);
+            tickTlAgents();
+            tlAgentTimer = setInterval(tickTlAgents, 2000);
+        }
+        function stopTL() {
+            clearInterval(tlQueueTimer);
+            clearInterval(tlAgentTimer);
+            tlQueueTimer = null;
+            tlAgentTimer = null;
+        }
+
+        // ---- Router ----
+        function setVisible(el, visible) {
+            el.classList.toggle("hidden", !visible);
+            el.classList.toggle("flex", visible);
+        }
+
+        function route() {
+            const isTL = location.hash === "#TL";
+            document.title = isTL ? "TL View" : "Dashboard";
+            setVisible(document.getElementById("view-tv"), !isTL);
+            setVisible(document.getElementById("view-tl"), isTL);
+            stopTV();
+            stopTL();
+            if (isTL) {
+                startTL();
+            } else {
+                startTV();
+            }
+        }
+        window.addEventListener("hashchange", route);
+        route();
+
+        // ---- Banner alert system ----
+        // A TL posts a temporary banner (message/urgency/duration) from the TL
+        // view; it renders across the top of every view, TV included. State
+        // lives in localStorage rather than in memory so it (a) survives a
+        // refresh and (b) syncs live to every other same-origin tab - the
+        // "storage" event fires in tabs OTHER than the one that wrote it,
+        // which is exactly the TL-posts / TV-displays split this is for.
+        const BANNER_STORAGE_KEY = "opsBanner";
+        const BANNER_URGENCY = {
+            info:     { bg: "var(--ctp-sapphire)", label: "Info",     pulse: false },
+            warning:  { bg: "var(--ctp-peach)",    label: "Warning",  pulse: false },
+            critical: { bg: "var(--ctp-red)",      label: "Critical", pulse: true },
+        };
+
+        function openBannerModal() {
+            document.getElementById("banner-message").value = "";
+            document.getElementById("banner-urgency").value = "warning";
+            document.getElementById("banner-duration").value = "15";
+            const modal = document.getElementById("banner-modal");
+            modal.classList.remove("hidden");
+            modal.classList.add("flex");
+            document.getElementById("banner-message").focus();
+        }
+
+        function closeBannerModal() {
+            const modal = document.getElementById("banner-modal");
+            modal.classList.add("hidden");
+            modal.classList.remove("flex");
+        }
+
+        function submitBanner() {
+            const message = document.getElementById("banner-message").value.trim();
+            if (!message) {
+                document.getElementById("banner-message").focus();
+                return;
+            }
+            const urgency = document.getElementById("banner-urgency").value;
+            const minutes = Number(document.getElementById("banner-duration").value);
+            localStorage.setItem(BANNER_STORAGE_KEY, JSON.stringify({
+                message, urgency, expiresAt: Date.now() + minutes * 60 * 1000,
+            }));
+            closeBannerModal();
+            renderBanner();
+        }
+
+        function dismissBanner() {
+            localStorage.removeItem(BANNER_STORAGE_KEY);
+            renderBanner();
+        }
+
+        function readBanner() {
+            try {
+                const raw = localStorage.getItem(BANNER_STORAGE_KEY);
+                if (!raw) return null;
+                const banner = JSON.parse(raw);
+                if (!banner?.expiresAt || banner.expiresAt <= Date.now()) return null;
+                return banner;
+            } catch {
+                return null;
+            }
+        }
+
+        // Polled every second (not just on the storage event) so the "Nm
+        // left" countdown ticks down and the banner self-clears on expiry
+        // even in a lone tab that never receives a storage event.
+        function renderBanner() {
+            const el = document.getElementById("alert-banner");
+            const banner = readBanner();
+            if (!banner) {
+                el.classList.add("hidden");
+                el.innerHTML = "";
+                return;
+            }
+            const cfg = BANNER_URGENCY[banner.urgency] ?? BANNER_URGENCY.info;
+            const remainingMin = Math.max(1, Math.ceil((banner.expiresAt - Date.now()) / 60000));
+            el.className = `shrink-0 flex items-center justify-between gap-4 px-5 py-2.5 text-[var(--ctp-crust)] ${cfg.pulse ? "long-call-pulse" : ""}`;
+            el.style.background = cfg.bg;
+            el.innerHTML = `
+                <span class="flex items-center gap-3 min-w-0">
+                    <span class="shrink-0 text-xs font-black uppercase tracking-widest rounded bg-[var(--ctp-crust)] px-2 py-0.5" style="color:${cfg.bg}">${cfg.label}</span>
+                    <span class="truncate text-sm font-bold">${escapeHtml(banner.message)}</span>
+                </span>
+                <span class="flex items-center gap-3 shrink-0">
+                    <span class="tabular text-xs font-semibold opacity-80">${remainingMin}m left</span>
+                    <button type="button" onclick="dismissBanner()" class="rounded-full bg-[var(--ctp-crust)]/20 hover:bg-[var(--ctp-crust)]/40 h-5 w-5 flex items-center justify-center text-xs font-black leading-none">×</button>
+                </span>`;
+        }
+        renderBanner();
+        setInterval(renderBanner, 1000);
+        window.addEventListener("storage", (e) => {
+            if (e.key === BANNER_STORAGE_KEY) renderBanner();
+        });
+
+        // ---- Header idle-hide (unchanged behavior) ----
+        const header = document.querySelector("header");
+        let headerTimer;
+        header.classList.add("hidden");
+        document.addEventListener("mousemove", () => {
+            header.classList.remove("hidden");
+            clearTimeout(headerTimer);
+            headerTimer = setTimeout(() => header.classList.add("hidden"), 2000);
+        });
+    </script>
+</body>
+</html>
